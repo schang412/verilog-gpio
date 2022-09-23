@@ -79,12 +79,12 @@ Software Reset Register: (AXIL_ADDR_BASE + 0x10) (WO)
 Write 0x0000_000A to perform a software reset
 
 -----------------------------------------------------------------------
-GPIO Info Register: (AXIL_ADDR_BASE + 0x14) (RO)
+GPIO Info Register: (AXIL_ADDR_BASE + 0x20) (RO)
 
 The number of GPIOs available to use.
 
 -----------------------------------------------------------------------
-GPIO Data Direction Register: (AXIL_ADDR_BASE + 0x20) (RW)
+GPIO Data Direction Register: (AXIL_ADDR_BASE + 0x24) (RW)
 
 The data direction register of length N (determined by NUM_GPIO). A set bit
 indicates that that GPIO should be an output. This register is 0x00 on reset.
@@ -93,18 +93,44 @@ Bit  31-N: Reserved
 Bit N-1:0: A 1 bit indicates that the corresponding GPIO is an output.
 
 -----------------------------------------------------------------------
-GPIO Data Out Register: (AXIL_ADDR_BASE + 0x24) (RW)
+GPIO Data Out Register: (AXIL_ADDR_BASE + 0x28) (RW)
 
 The data output register of length N (determined by NUM_GPIO). When both the
 DDR and OUT bit is set, a data high is asserted on the pin. If the DDR is set
 while the OUT bit is unset, a data low is asserted on the corresponding pin.
 
 -----------------------------------------------------------------------
-GPIO Data In Register: (AXIL_ADDR_BASE + 0x28) (RO)
+GPIO Data In Register: (AXIL_ADDR_BASE + 0x2C) (RO)
 
 The data input register of length N (determined by NUM_GPIO). When a bit is set,
 this indicates that a logic 1 is asserted on the pin. If the bit is unset, a
 logic 0 is asserted on the pin.
+
+-----------------------------------------------------------------------
+GPIO Data Input Interrupt Rising Edge Register: (AXIL_ADDR_BASE + 0x30) (RW)
+
+The data input register of length N (determined by NUM_GPIO). When a bit is set,
+a rising edge on the corresponding input pin will trigger an interrupt request.
+
+-----------------------------------------------------------------------
+GPIO Data Input Interrupt Falling Edge Register: (AXIL_ADDR_BASE + 0x34) (RW)
+
+The data input register of length N (determined by NUM_GPIO). When a bit is set,
+a falling edge on the corresponding input pin will trigger an interrupt request.
+
+-----------------------------------------------------------------------
+GPIO Data Input Interrupt Enable Register: (AXIL_ADDR_BASE + 0x38) (RW)
+
+The data input register of length N (determined by NUM_GPIO). When a bit is set,
+an edge on the corresponding input pin will trigger an interrupt request so long as the
+edge type matches that of the input control register and interrupts are enabled.
+
+-----------------------------------------------------------------------
+GPIO Data Input Interrupt Status Register: (AXIL_ADDR_BASE + 0x3C) (RW1C)
+
+Write 1 to clear this register. The data input register of length N (determined by NUM_GPIO).
+Read this register after an IRQ pulse to determine which pin triggered the interrupt. If multiple
+interrupts are triggered, this register will hold the first trigger.
 
 */
 
@@ -148,13 +174,28 @@ wire axis_read_ext_tready;
 // software reset
 reg software_rst = 0;
 
-
+// gpio registers
 reg [31:0] data_direct_reg = 32'b0;
 reg [31:0] data_output_reg = 32'b0;
 reg [31:0]  data_input_reg = 32'b0;
 
 assign gpio_o = data_output_reg[NUM_GPIO-1:0];
 assign gpio_t = ~data_output_reg[NUM_GPIO-1:0];
+
+// interrupts
+reg [31:0] irq_redge_en = 32'b0;
+reg [31:0] irq_fedge_en = 32'b0;
+reg [31:0] irq_status_summary = 32'b0;
+reg [31:0] irq_status_summary_last = 32'b0;
+reg [31:0] irq_bit_mask = 32'b0;
+
+reg [31:0] data_input_reg_last = 32'b0;
+wire [31:0] data_input_redge;
+wire [31:0] data_input_fedge;
+
+assign data_input_redge = (~data_input_reg_last & data_input_reg);
+assign data_input_fedge = (data_input_reg_last & ~data_input_reg);
+assign irq = (|(irq_status_summary & ~irq_status_summary_last));
 
 
 /*
@@ -201,6 +242,9 @@ always @(posedge clk) begin
         s_axil_bvalid_reg <= s_axil_bvalid_next;
 
         data_input_reg[NUM_GPIO-1:0] <= gpio_i;
+        data_input_reg_last <= data_input_reg;
+
+        irq_status_summary_last <= irq_status_summary;
 
         if (do_axil_write) begin
             case ({s_axil_awaddr >> 2, 2'b00})
@@ -213,7 +257,7 @@ always @(posedge clk) begin
                 end
 
                 // GPIO Data Direction Register
-                AXIL_ADDR_BASE+8'h20: begin
+                AXIL_ADDR_BASE+8'h24: begin
                     if (s_axil_wstrb[0]) begin
                         data_direct_reg[7:0] <= s_axil_wdata[7:0];
                     end
@@ -229,7 +273,7 @@ always @(posedge clk) begin
                 end
 
                 // GPIO Data Output Register
-                AXIL_ADDR_BASE+8'h24: begin
+                AXIL_ADDR_BASE+8'h28: begin
                     if (s_axil_wstrb[0]) begin
                         data_output_reg[7:0] <= s_axil_wdata[7:0];
                     end
@@ -241,6 +285,57 @@ always @(posedge clk) begin
                     end
                     if (s_axil_wstrb[3]) begin
                         data_output_reg[31:24] <= s_axil_wdata[31:24];
+                    end
+                end
+
+                AXIL_ADDR_BASE+8'h30: begin
+                    if (s_axil_wstrb[0]) begin
+                        irq_redge_en[7:0] <= s_axil_wdata[7:0];
+                    end
+                    if (s_axil_wstrb[1]) begin
+                        irq_redge_en[15:8] <= s_axil_wdata[15:8];
+                    end
+                    if (s_axil_wstrb[2]) begin
+                        irq_redge_en[23:16] <= s_axil_wdata[23:16];
+                    end
+                    if (s_axil_wstrb[3]) begin
+                        irq_redge_en[31:24] <= s_axil_wdata[31:24];
+                    end
+                end
+
+                AXIL_ADDR_BASE+8'h34: begin
+                    if (s_axil_wstrb[0]) begin
+                        irq_fedge_en[7:0] <= s_axil_wdata[7:0];
+                    end
+                    if (s_axil_wstrb[1]) begin
+                        irq_fedge_en[15:8] <= s_axil_wdata[15:8];
+                    end
+                    if (s_axil_wstrb[2]) begin
+                        irq_fedge_en[23:16] <= s_axil_wdata[23:16];
+                    end
+                    if (s_axil_wstrb[3]) begin
+                        irq_fedge_en[31:24] <= s_axil_wdata[31:24];
+                    end
+                end
+
+                AXIL_ADDR_BASE+8'h38: begin
+                    if (s_axil_wstrb[0]) begin
+                        irq_bit_mask[7:0] <= s_axil_wdata[7:0];
+                    end
+                    if (s_axil_wstrb[1]) begin
+                        irq_bit_mask[15:8] <= s_axil_wdata[15:8];
+                    end
+                    if (s_axil_wstrb[2]) begin
+                        irq_bit_mask[23:16] <= s_axil_wdata[23:16];
+                    end
+                    if (s_axil_wstrb[3]) begin
+                        irq_bit_mask[31:24] <= s_axil_wdata[31:24];
+                    end
+                end
+
+                AXIL_ADDR_BASE+8'h3C: begin
+                    if (s_axil_wdata == 32'd01) begin
+                        irq_status_summary_last <= 32'd0;
                     end
                 end
 
@@ -289,20 +384,40 @@ always @(posedge clk) begin
                 AXIL_ADDR_BASE+8'h08: s_axil_rdata_reg <= RB_NEXT_PTR;
 
                 // GPIO Info Register
-                AXIL_ADDR_BASE+8'h14: s_axil_rdata_reg <= NUM_GPIO;
+                AXIL_ADDR_BASE+8'h20: s_axil_rdata_reg <= NUM_GPIO;
 
                 // GPIO Data Direction Register
-                AXIL_ADDR_BASE+8'h20: s_axil_rdata_reg <= data_direct_reg;
+                AXIL_ADDR_BASE+8'h24: s_axil_rdata_reg <= data_direct_reg;
 
                 // GPIO Data Output Register
-                AXIL_ADDR_BASE+8'h24: s_axil_rdata_reg <= data_output_reg;
+                AXIL_ADDR_BASE+8'h28: s_axil_rdata_reg <= data_output_reg;
 
                 // GPIO Data Input Register
-                AXIL_ADDR_BASE+8'h28: s_axil_rdata_reg <= data_input_reg;
+                AXIL_ADDR_BASE+8'h2C: s_axil_rdata_reg <= data_input_reg;
 
+                // GPIO Input Interrupt Rising Edge Trigger Register
+                AXIL_ADDR_BASE+8'h30: s_axil_rdata_reg <= irq_redge_en;
+
+                // GPIO Input Interrupt Falling Edge Trigger Register
+                AXIL_ADDR_BASE+8'h34: s_axil_rdata_reg <= irq_fedge_en;
+
+                // GPIO Input Interrupt Mask Register
+                AXIL_ADDR_BASE+8'h38: s_axil_rdata_reg <= irq_bit_mask;
+
+                // GPIO Input Interrupt Mask Register
+                AXIL_ADDR_BASE+8'h3C: s_axil_rdata_reg <= irq_status_summary_last;
                 default: ;
             endcase
         end // do_axil_read
+    end
+end
+
+always @* begin
+    if (irq_status_summary_last == 32'd0) begin
+        irq_status_summary = irq_bit_mask & (
+                                (data_input_redge & irq_redge_en) |
+                                (data_input_fedge & irq_fedge_en)
+                            );
     end
 end
 

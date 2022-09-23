@@ -14,6 +14,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/spinlock.h>
 
 
 #define AXIL32_VERILOG_GPIO_MAX_GPIO    32
@@ -29,9 +30,14 @@
 #define A32V_GPIO_RESETR_OFFSET         0x10 // Interface Reset Register
 #define A32V_GPIO_RESET_VECTOR          0x0A // the value to write
 
-#define A32V_GPIO_DDR_OFFSET            0x20 // GPIO Data Direction Control Register
-#define A32V_GPIO_OUT_OFFSET            0x24 // GPIO Data Output Control Register
-#define A32V_GPIO_IN_OFFSET             0x28 // GPIO Data Input Control Register
+#define A32V_GPIO_DDR_OFFSET            0x24 // GPIO Data Direction Control Register
+#define A32V_GPIO_OUT_OFFSET            0x28 // GPIO Data Output Control Register
+#define A32V_GPIO_IN_OFFSET             0x2C // GPIO Data Input Control Register
+
+#define A32V_GPIO_INTRPT_RISING_TRIGGER_OFFSET      0x30 // GPIO Data Input Interrupt Rising Trigger Register
+#define A32V_GPIO_INTRPT_FALLING_TRIGGER_OFFSET     0x30 // GPIO Data Input Interrupt Falling Trigger Register
+#define A32V_GPIO_INTRPT_MASK_OFFSET                0x38 // GPIO Data Input Interrupt Mask Register
+#define A32V_GPIO_INTRPT_STATUS_OFFSET              0x3C // GPIO Data Input Interrupt Status Register
 
 
 struct axil32v_gpio {
@@ -41,6 +47,87 @@ struct axil32v_gpio {
     struct device *dev;
 
     struct clk *pclk;
+};
+
+static void a32v_gpio_irq_mask(struct irq_data *d)
+{
+    struct gpio_chip *chip = irq_data_get_irq_chip_data(d);
+    struct axil32v_gpio *a32v_gpio = gpiochip_get_data(chip);
+    u32 interrupt_mask;
+
+    interrupt_mask = ioread32(a32v_gpio->regs + A32V_GPIO_INTRPT_MASK_OFFSET);
+    interrupt_mask = interrupt_mask | BIT(d->hwirq);
+    iowrite32(interrupt_mask, a32v_gpio->regs + A32V_GPIO_INTRPT_MASK_OFFSET);
+}
+
+static void a32v_gpio_irq_unmask(struct irq_data *d)
+{
+    struct gpio_chip *chip = irq_data_get_irq_chip_data(d);
+    struct axil32v_gpio *a32v_gpio = gpiochip_get_data(chip);
+    u32 interrupt_mask;
+
+    interrupt_mask = ioread32(a32v_gpio->regs + A32V_GPIO_INTRPT_MASK_OFFSET);
+    interrupt_mask = interrupt_mask & ~BIT(d->hwirq);
+    iowrite32(interrupt_mask, a32v_gpio->regs + A32V_GPIO_INTRPT_MASK_OFFSET);
+}
+
+static int a32v_gpio_irq_set_type(struct irq_data *d, unsigned int type)
+{
+    struct gpio_chip *chip = irq_data_get_irq_chip_data(d);
+    struct axil32v_gpio *a32v_gpio = gpiochip_get_data(chip);
+    unsigned long flags;
+    u32 redge, fedge;
+    u32 mask = BIT(d->hwirq);
+    int ret = 0;
+
+    spin_lock_irqsave(&chip->bgpio_lock, flags);
+    redge = ioread32(a32v_gpio->regs + A32V_GPIO_INTRPT_RISING_TRIGGER_OFFSET) & ~mask;
+    fedge = ioread32(a32v_gpio->regs + A32V_GPIO_INTRPT_FALLING_TRIGGER_OFFSET) & ~mask;
+
+    if (type == IRQ_TYPE_EDGE_RISING) {
+        redge |= mask;
+    } else if (type == IRQ_TYPE_EDGE_FALLING) {
+        fedge |= mask;
+    } else if (type == IRQ_TYPE_EDGE_BOTH) {
+        redge |= mask;
+        fedge |= mask;
+    } else {
+        ret = -EINVAL;
+        goto err_irq_type;
+    }
+
+    iowrite32(redge, a32v_gpio->regs + A32V_GPIO_INTRPT_RISING_TRIGGER_OFFSET);
+    iowrite32(fedge, a32v_gpio->regs + A32V_GPIO_INTRPT_FALLING_TRIGGER_OFFSET);
+
+err_irq_type:
+    spin_unlock_irqrestore(&chip->bgpio_lock, flags);
+    return ret;
+}
+
+static void a32v_gpio_irq_handler(struct irq_desc *desc)
+{
+    struct gpio_chip *chip = irq_desc_get_handler_data(desc);
+    struct axil32v_gpio *a32v_gpio = gpiochip_get_data(chip);
+    struct irq_chip *irqchip = irq_desc_get_chip(desc);
+    unsigned long status;
+    int hwirq;
+
+    chained_irq_enter(irqchip, desc);
+
+    status = ioread32(a32v_gpio->regs + A32V_GPIO_INTRPT_STATUS_OFFSET) &
+            ~ioread32(a32v_gpio->regs + A32V_GPIO_INTRPT_MASK_OFFSET);
+
+    for_each_set_bit(hwirq, &status, chip->ngpio)
+        generic_handle_irq(irq_find_mapping(chip->irq.domain, hwirq));
+
+    chained_irq_exit(irqchip, desc);
+}
+
+static struct irq_chip a32v_gpio_irqchip = {
+    .name = "a32v-gpio",
+    .irq_mask = a32v_gpio_irq_mask,
+    .irq_unmask = a32v_gpio_irq_unmask,
+    .irq_set_type = a32v_gpio_irq_set_type
 };
 
 
@@ -68,7 +155,7 @@ static int a32v_gpio_probe(struct platform_device *pdev)
 {
     struct axil32v_gpio *a32v_gpio;
     struct resource *res;
-    int ret;
+    int ret, irq;
     u32 num_gpios = 32;
 
     a32v_gpio = devm_kzalloc(&pdev->dev, sizeof(*a32v_gpio), GFP_KERNEL);
@@ -123,6 +210,26 @@ static int a32v_gpio_probe(struct platform_device *pdev)
     if (ret) {
         dev_err(&pdev->dev, "Failed to enable the peripheral clock, %d\n", ret);
         return ret;
+    }
+
+    irq = platform_get_irq(pdev, 0);
+    if (irq >= 0) {
+        struct gpio_irq_chip *girq;
+
+        girq = &a32v_gpio->gc.irq;
+        girq->chip = &a32v_gpio_irqchip;
+        girq->parent_handler = a32v_gpio_irq_handler;
+        girq->num_parents = 1;
+        girq->parents = devm_kcalloc(&pdev->dev, 1,
+                                     sizeof(*girq->parents),
+                                     GFP_KERNEL);
+        if (!girq->parents) {
+            ret = -ENOMEM;
+            goto err_disable_clk;
+        }
+        girq->parents[0] = irq;
+        girq->default_type = IRQ_TYPE_NONE;
+        girq->handler = handle_edge_irq;
     }
 
     ret = devm_gpiochip_add_data(&pdev->dev, &a32v_gpio->gc, a32v_gpio);
