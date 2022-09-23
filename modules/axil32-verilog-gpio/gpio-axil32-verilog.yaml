@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: MIT
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/gpio/gpio-axil32-verilog.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Verilog 32-Bit AXIL GPIO Controller
+
+maintainers:
+  - Spencer Chang <spencer@sycee.xyz>
+
+allOf:
+  - $ref: "spi-controller.yaml#"
+
+properties:
+  compatible:
+    enum:
+      - axil32verilog,gpio-0.1.0
+
+  reg:
+    maxItems: 1
+
+  gpio-controller: true
+
+  '#gpio-cells':
+    const: 2
+
+  ngpios:
+    minimum: 0
+    maximum: 32
+
+required:
+  - compatible
+  - reg
+  - gpio-controller
+  - '#gpio-cells'
+
+additionalProperties: false
+
+examples:
+  - |
+    gpio0: gpio@41e00000 {
+      compatible = "axil32verilog,gpio-0.1.0";
+      reg = <0x41e00000 0x10000>;
+      #gpio-cells = <2>;
+      ngpios = <12>;
+      gpio-controller;
+    };
+...
