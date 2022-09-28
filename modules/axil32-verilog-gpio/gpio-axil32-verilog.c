@@ -161,6 +161,7 @@ static int a32v_gpio_probe(struct platform_device *pdev)
     a32v_gpio = devm_kzalloc(&pdev->dev, sizeof(*a32v_gpio), GFP_KERNEL);
     if (!a32v_gpio)
         return -ENOMEM;
+    a32v_gpio->dev = &pdev->dev;
 
     // get the base address of the IP
     res = platform_get_resource(pdev, IORESOURCE_MEM, 0);

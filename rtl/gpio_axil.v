@@ -6,7 +6,7 @@
 `default_nettype none
 
 /*
- * SPI master AXI lite wrapper
+ * GPIO master AXI lite wrapper
  */
 module gpio_axil #
 (
