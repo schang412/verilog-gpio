@@ -72,7 +72,7 @@ async def run_test(dut):
     assert ddr == 0x00
 
     # test output
-    await tb.axil_master.write_dword(baseaddr + A32V_GPIO_OUT_OFFSET, 0xffff_ffff)
+    await tb.axil_master.write_dword(baseaddr + A32V_GPIO_DDR_OFFSET, 0xffff_ffff)
     for test_vector in test_vectors:
         v = bmask & test_vector
         await tb.axil_master.write_dword(baseaddr + A32V_GPIO_OUT_OFFSET, v)

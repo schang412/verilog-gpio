@@ -180,7 +180,7 @@ reg [31:0] data_output_reg = 32'b0;
 reg [31:0]  data_input_reg = 32'b0;
 
 assign gpio_o = data_output_reg[NUM_GPIO-1:0];
-assign gpio_t = ~data_output_reg[NUM_GPIO-1:0];
+assign gpio_t = ~data_direct_reg[NUM_GPIO-1:0];
 
 // interrupts
 reg [31:0] irq_redge_en = 32'b0;
